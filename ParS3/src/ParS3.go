@@ -1,129 +1,130 @@
+// HDFS Config Details: https://github.com/zyxar/hdfs
+
 package main
 
 import (
-	"launchpad.net/goamz/aws"
-	"launchpad.net/goamz/s3"
-	"fmt"
-	"os"
-//	"os/user"
-	"strings"
-	"runtime"
-	"io/ioutil"
-//	"code.google.com/p/gcfg"
-//	"github.com/zyxar/hdfs"
+	"bufio"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
+	"fmt"
+	//"github.com/zyxar/hdfs"
+	"io/ioutil"
+	"launchpad.net/goamz/aws"
+	"launchpad.net/goamz/s3"
+	"os"
+	"os/user"
+	"path"
+	"runtime"
+	"strings"
 	"time"
 )
 
-type continueOn  struct {
+type continueOn struct {
 	nextMarker string
-	truncated bool
-	finished bool
+	truncated  bool
+	finished   bool
 }
 
-
-
-
-
-
+type ConfigSettingsType struct {
+	AWSCredentials AWSCredentialsType
+	System         SystemType
+}
 
 type AWSCredentialsType struct {
 	AccessKey string
 	SecretKey string
 }
 
-//var HDFSServer string = "localhost"
-//var HDFSPort uint16 = 8020
+type SystemType struct {
+	javaHome     string
+	ldPath       string
+	hadoopServer string
+	hadoopPort   uint16
+}
 
+type fileInfo struct {
+	FileName      string
+	WriteLocation string
+	MD5Sum        string
+	File          []byte
+	Size          int
+}
 
-func getandsave(b s3.Bucket, prefix string, left, right chan continueOn, done chan<- struct{}, threadNum int, directory string, maxMarker int) {
+// Global Constants
+
+var workers int = runtime.NumCPU()
+
+const hadoopServer string = "default"
+const hadoopPort int = 0
+
+func getandsave(b s3.Bucket, prefix string, left, right chan continueOn, done chan<- struct{}, threadNum int, directory string, maxMarker int, hadoop bool, hashCheck bool) {
 	grab := <-right
 
-	if grab.finished == true{
+	if grab.finished == true {
 		left <- grab
 		done <- struct{}{}
 		return
 	}
-//	if grab.truncated == false {
-//		left <- continueOn{truncated: false, nextMarker: ""}
-//		done <- struct{}{}
-//		return
-//	}
+	//	if grab.truncated == false {
+	//		left <- continueOn{truncated: false, nextMarker: ""}
+	//		done <- struct{}{}
+	//		return
+	//	}
+
 	resp, err := b.List(prefix, "", grab.nextMarker, maxMarker)
 	if err != nil {
 		fmt.Println(err)
-		for e := 0; e <=5 && err != nil; e++ {
+		for e := 0; e <= 5 && err != nil; e++ {
 			time.Sleep(3 * time.Second)
 			resp, err = b.List(prefix, "", grab.nextMarker, maxMarker)
-			if e == 5{
+			if e == 5 {
 				panic("Directory List Failed")
 			}
 		}
 	}
 
-
-	onward := continueOn{resp.Contents[len(resp.Contents) - 1].Key, resp.IsTruncated, false}
+	onward := continueOn{resp.Contents[len(resp.Contents)-1].Key, resp.IsTruncated, false}
 
 	switch onward.truncated {
-	case true: left <- onward
-	case false: left <- continueOn{nextMarker: "", truncated: false, finished: true}
+	case true:
+		left <- onward
+	case false:
+		left <- continueOn{nextMarker: "", truncated: false, finished: true}
 	}
 
-//	if len(resp.Contents) == 1 {
-//		fmt.Println("Not Downloading")
-//		done <- struct{}{}
-//		return
-//	
+	//	if len(resp.Contents) == 1 {
+	//		fmt.Println("Not Downloading")
+	//		done <- struct{}{}
+	//		return
+	//
 	startIndex := 0
 	if grab.nextMarker == "" {
 		startIndex = 1
 	}
-
-	writepath := ""
-	fmt.Println("Running here")
-	//Connect to HDFS
-//	fs, err := hdfs.ConnectAsUser(HDFSServer, HDFSPort, "nick")
-	
-	for j := startIndex; j <= len(resp.Contents) - 1; j++ {
-
-		FileGet := resp.Contents[j].Key
-
-		f, err := b.Get(FileGet)
-		if err != nil {
-			fmt.Println(err)
-			for e := 0; e <=5 && err != nil; e++ {
-				time.Sleep(3 * time.Second)
-				f, err = b.Get(FileGet)
-				if e == 5{
-					panic("File Download Failed")
-				}
-		}
+	var finished string = ""
+	if hadoop == true {
+		fmt.Println("Remove me")
+		//finished = hadoopWrite(*resp, b, directory, startIndex)
+	} else {
+		finished = standardWrite(*resp, b, directory, startIndex, hashCheck)
 	}
 
-		Splits := strings.SplitAfter(FileGet, "/")
+	//	for j := startIndex; j <= len(resp.Contents)-1; j++ {
+	//
+	//		fileData := s3Get(j, *resp, b, directory)
+	//
+	//
+	//
+	//
+	//
+	//
+	//	}
 
-		writepath = directory + Splits[len(Splits) - 1]
-		//file, err := os.Create(Splits[len(Splits) - 1])
-		file, err := os.Create(writepath)
-		if err != nil {
-			panic(err)
-		}
-		fmt.Println("Writing File: ", Splits[len(Splits) - 1])
-		
-		// Hadoop Write
-		//file, err := fs.OpenFile(writepath, 01|0100, 0, 0, 0)
-		//if err != nil {
-		//	panic(err)
-		//}
-		file.Write(f)
-		file.Close()
-		
-		
-}
+	fmt.Println(finished)
+
 	done <- struct{}{}
-	//fs.Disconnect()
-
 
 }
 
@@ -131,13 +132,169 @@ func awaitCompletion(done <-chan struct{}) {
 	for f := 0; f < workers; f++ {
 		<-done
 	}
-//	close(leftmost)
+	//	close(leftmost)
 }
 
-var workers = runtime.NumCPU() * 16
+func s3Get(j int, resp s3.ListResp, b s3.Bucket, directory string) fileInfo {
 
+	FileGet := resp.Contents[j].Key
 
+	f, err := b.Get(FileGet)
+	if err != nil {
+		fmt.Println(err)
+		for e := 0; e <= 5 && err != nil; e++ {
+			time.Sleep(3 * time.Second)
+			f, err = b.Get(FileGet)
+			if e == 5 {
+				panic("File Download Failed")
+			}
+		}
+	}
 
+	dir, filename := path.Split(FileGet)
+
+	return fileInfo{
+		FileName:      filename,
+		WriteLocation: path.Join(directory, dir),
+		MD5Sum:        resp.Contents[j].ETag,
+		File:          f,
+		Size:          len(f),
+	}
+
+}
+
+//func hadoopWrite(resp s3.ListResp, b s3.Bucket, directory string, startIndex int) string {
+//
+//	currentUser, err := user.Current()
+//	if err != nil {
+//		panic(err)
+//	}
+//
+//	fs, err := hdfs.ConnectAsUser(hadoopServer, 0, currentUser.Name)
+//	if err != nil {
+//		panic(err)
+//	}
+//
+//	fmt.Println("Running files: ", len(resp.Contents)-1)
+//
+//	for j := startIndex; j <= len(resp.Contents)-1; j++ {
+//		//
+//		//		FileGet := resp.Contents[j].Key
+//		//
+//		//		f, err := b.Get(FileGet)
+//		//		if err != nil {
+//		//			fmt.Println(err)
+//		//			for e := 0; e <= 5 && err != nil; e++ {
+//		//				time.Sleep(3 * time.Second)
+//		//				f, err = b.Get(FileGet)
+//		//				if e == 5 {
+//		//					panic("File Download Failed")
+//		//				}
+//		//			}
+//		//		}
+//
+//		fileData := s3Get(j, resp, b, directory)
+//
+//		fmt.Println("Writing File: ", fileData.FileName)
+//		fmt.Println("To Directory: ", fileData.WriteLocation)
+//
+//		file, err := fs.OpenFile(fileData.WriteLocation, 01|0100, 0, 0, 0)
+//		if err != nil {
+//			panic(err)
+//		}
+//		fs.Write(file, fileData.File, fileData.Size)
+//		fs.Flush(file)
+//		fs.CloseFile(file)
+//
+//	}
+//
+//	fs.Disconnect()
+//
+//	return "done"
+//}
+
+func standardWrite(resp s3.ListResp, b s3.Bucket, directory string, startIndex int, hashCheck bool) string {
+
+	fmt.Println("Running files: ", len(resp.Contents)-1)
+
+	for j := startIndex; j <= len(resp.Contents)-1; j++ {
+
+		fileData := s3Get(j, resp, b, directory)
+
+		// Check for Directory
+		err := os.MkdirAll(fileData.WriteLocation, 0777)
+		if err != nil {
+			panic(err)
+		}
+
+		fmt.Println("Writing File: ", path.Join(fileData.WriteLocation, fileData.FileName))
+
+		file, _ := os.Create(path.Join(fileData.WriteLocation, fileData.FileName))
+		writer := bufio.NewWriter(file)
+		writer.Write(fileData.File)
+		writer.Flush()
+		file.Close()
+
+		if hashCheck == true {
+
+			file, _ := ioutil.ReadFile(fileData.WriteLocation)
+
+			s3Hash := strings.Replace(fileData.MD5Sum, "\"", "", -1)
+			hash := md5.New()
+			hash.Write(file)
+			hashString := hex.EncodeToString(hash.Sum([]byte{}))
+
+			if hashString != s3Hash {
+				fmt.Println("File MD5 Hash Unmatched")
+				j--
+			}
+		}
+
+	}
+
+	return "done"
+}
+
+//func configureHadoop(javaHome, ldPath string) {
+//
+//	//Set Java Home
+//	os.Setenv("JAVA_HOME", javaHome)
+//	os.Setenv("LD_LIBRARY_PATH", ldPath)
+//
+//	//Build CLASSPATH
+//
+//	//classpath := "/home/hadoop/conf:" + javaHome + "lib/tools.jar"
+//	classpath := "/etc/hadoop/conf:" + javaHome + "lib/tools.jar"
+//
+//	//Grab JAR Files from Hadoop Root Dir
+//	//rootList, err := ioutil.ReadDir("/home/hadoop/")
+//	rootList, err := ioutil.ReadDir("/usr/lib/hadoop/")
+//	if err != nil {
+//		panic(err)
+//	}
+//
+//	for _, fi := range rootList {
+//		//classpath = classpath + ":/home/hadoop/" + fi.Name()
+//		classpath = classpath + ":/usr/lib/hadoop/" + fi.Name()
+//	}
+//
+//	// Grab JAR Files from Hadoop Lib Dir
+//	//libList, err := ioutil.ReadDir("/home/hadoop/lib/")
+//	libList, err := ioutil.ReadDir("/usr/lib/hadoop/lib/")
+//	if err != nil {
+//		panic(err)
+//	}
+//
+//	for _, fi := range libList {
+//		//classpath = classpath + ":/home/hadoop/lib/" + fi.Name()
+//		classpath = classpath + ":/usr/lib/hadoop/lib/" + fi.Name()
+//	}
+//
+//	os.Setenv("CLASSPATH", classpath)
+//
+//	// Connect to Hadoop
+//
+//}
 
 func main() {
 
@@ -146,46 +303,56 @@ func main() {
 	prefix := flag.String("prefix", "TestCSV/", "Prefix from which to retrieve files")
 	directory := flag.String("dir", "/Users/nrobison/Developer/git/ParS3/", "Directory to store files")
 	maxMarker := flag.Int("max", 1000, "Max Markers to Retrieve per Worker")
+	hadoopWrite := flag.Bool("hadoop", false, "Write Files to Hadoop Destination")
+	hashCheck := flag.Bool("hash", false, "Check MD5 Hashes of Downloaded Files")
 	flag.Parse()
 
-	// Setup User Environment
-//	usr, err := user.()
-//	if err != nil {
-//		panic(err)
-//	}
-	//HomeDir := usr.HomeDir + "/.ParS3"
-//	fmt.Println(HomeDir)
+	hadoop := *hadoopWrite
+	//
+	//	hadoopfill := hdfs.FileInfo {
+	//		Name: "test",
+	//		}
+	//	fmt.Println(hadoopfill.Name)
 
-	// Read in Config File
-//	file, err := ioutil.ReadFile(usr.HomeDir + "/.ParS3")
-	file, err := ioutil.ReadFile(".ParS3")
+	// Get User HomeDir
+	currentUser, err := user.Current()
 	if err != nil {
 		panic(err)
 	}
 
-	var cfgFile AWSCredentialsType
+	// Read in Config File
+	//TODO Add Error Checking for Config File
+	configDir := currentUser.HomeDir + "/.ParS3"
+
+	file, err := ioutil.ReadFile(configDir)
+	if err != nil {
+		panic(err)
+	}
+
+	//var cfgFile AWSCredentialsType
+	var cfgFile ConfigSettingsType
 	json.Unmarshal(file, &cfgFile)
 
-//	hadoopfs, err := hdfs.Connect("localhost", 8020)
-//	if err != nil {
-//		panic(err)
-//	}
-
-	//auth, err := aws.EnvAuth()
-	//if err != nil {
-	//	panic(err)
-	//}
-
-	auth := aws.Auth {
-		AccessKey: cfgFile.AccessKey,
-		SecretKey: cfgFile.SecretKey,
+	auth := aws.Auth{
+		AccessKey: cfgFile.AWSCredentials.AccessKey,
+		SecretKey: cfgFile.AWSCredentials.SecretKey,
 	}
+
+//	if hadoop == true {
+//		configureHadoop(cfgFile.System.javaHome, cfgFile.System.ldPath)
+//	}
 
 	e := s3.New(auth, aws.USEast)
 
-	b := s3.Bucket {
-		S3: e,
+	b := s3.Bucket{
+		S3:   e,
 		Name: *srcbucket,
+	}
+
+	// Check for Directory
+	errdir := os.MkdirAll(*directory, 0777)
+	if errdir != nil {
+		panic(errdir)
 	}
 
 	i := s3.Bucket(b)
@@ -200,23 +367,21 @@ func main() {
 		leftmost = make(chan continueOn)
 		right = leftmost
 		left = leftmost
-	for z := 0; z < workers; z++ {
-//		nextLoop = getandsave(i, "Singles/", passit.nextMarker, passit)
-		//nextLoop = <-passit
-//		fmt.Println("mainLoop")
-		right = make(chan continueOn)
-		go getandsave(i, *prefix, left, right, done, z, *directory, *maxMarker)
-		//nextLoop = <-right
-		left = right
-//		fmt.Println("Running next on: ", nextLoop.nextMarker)
-		//fmt.Println(nextLoop.markersReturned)
-//		left = make(chan continueOn)
+		for z := 0; z < workers; z++ {
+			//		nextLoop = getandsave(i, "Singles/", passit.nextMarker, passit)
+			//nextLoop = <-passit
+			//		fmt.Println("mainLoop")
+			right = make(chan continueOn)
+			go getandsave(i, *prefix, left, right, done, z, *directory, *maxMarker, hadoop, *hashCheck)
+			//nextLoop = <-right
+			left = right
+			//		fmt.Println("Running next on: ", nextLoop.nextMarker)
+			//fmt.Println(nextLoop.markersReturned)
+			//		left = make(chan continueOn)
+		}
+		go func(c chan continueOn) { c <- nextLoop }(right)
+		nextLoop = <-leftmost
+		awaitCompletion(done)
 	}
-	go func(c chan continueOn) { c <-nextLoop}(right)
-	nextLoop = <-leftmost
-	awaitCompletion(done)
-}
-
-
 
 }
