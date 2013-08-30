@@ -52,6 +52,15 @@ type fileInfo struct {
 	Size          int
 }
 
+type Job struct {
+	filename string
+	results chan<- Result
+}
+
+type Result struct {
+	filename string
+}
+
 // Global Constants
 
 var workers int = runtime.NumCPU()
@@ -296,15 +305,44 @@ func standardWrite(resp s3.ListResp, b s3.Bucket, directory string, startIndex i
 //
 //}
 
+func addJobs(jobs chan<- Job, files []os.FileInfo, results chan<- Result) {
+	for _, file := range files {
+		jobs <- Job{file.Name(), results}
+	}
+	close(jobs)
+}
+
+func doJobs(done chan<- struct{}, b s3.Bucket, dir string, prefix string, jobs <-chan Job) {
+	for job := range jobs {
+	s3Put(b, job.filename, dir, prefix)
+	}
+	done <- struct{}{}
+
+}
+
+func s3Put(b s3.Bucket, filename string, dir string, prefix string) {
+	readLocation := path.Join(dir, filename)
+	s3Path := path.Join(prefix, filename)
+	fmt.Println("Reading ", readLocation) 
+	file, err := ioutil.ReadFile(readLocation)
+	if err != nil {
+		panic(err)
+	}
+	
+	fmt.Println("Putting ", filename)
+	b.Put(s3Path, file, "binary/octet-stream", s3.Private)
+}
+
 func main() {
 
 	// Define flags
 	srcbucket := flag.String("bucket", "bmi-weather-test", "Bucket from which to retrieve files")
-	prefix := flag.String("prefix", "TestCSV/", "Prefix from which to retrieve files")
+	prefix := flag.String("prefix", "Temp/", "Prefix from which to retrieve files")
 	directory := flag.String("dir", "/Users/nrobison/Developer/git/ParS3/", "Directory to store files")
 	maxMarker := flag.Int("max", 1000, "Max Markers to Retrieve per Worker")
 	hadoopWrite := flag.Bool("hadoop", false, "Write Files to Hadoop Destination")
 	hashCheck := flag.Bool("hash", false, "Check MD5 Hashes of Downloaded Files")
+	gets := flag.Bool("gets", false, "Get Files from S3")
 	flag.Parse()
 
 	hadoop := *hadoopWrite
@@ -357,6 +395,8 @@ func main() {
 
 	i := s3.Bucket(b)
 	//fmt.Println("Number of workers: ", workers)
+	
+	if *gets == true {
 	nextLoop := continueOn{truncated: true, nextMarker: "", finished: false}
 	done := make(chan struct{}, workers)
 	leftmost := make(chan continueOn)
@@ -383,5 +423,27 @@ func main() {
 		nextLoop = <-leftmost
 		awaitCompletion(done)
 	}
+	}
+	
+	if *gets != true {
+	
+		// Get Directory List
+		files, _ := ioutil.ReadDir(*directory)
+		fmt.Println("Uploading %s files", len(files))
+		
+		jobs := make(chan Job, workers)
+		results := make(chan Result, len(files))
+		done := make(chan struct{}, workers)
+		
+		go addJobs(jobs, files, results)
+		for j := 0; j < workers; j++ {
+			go doJobs(done, i, *directory, *prefix, jobs)
+		}
+		awaitCompletion(done)
+		close(results)
+			
+		
+	}
 
 }
+
