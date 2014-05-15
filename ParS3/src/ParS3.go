@@ -54,11 +54,24 @@ type fileInfo struct {
 
 type Job struct {
 	filename string
-	results chan<- Result
+	results  chan<- Result
 }
 
 type Result struct {
 	filename string
+}
+
+type s3Directory struct {
+	bucket string
+	prefix string
+	files []s3File
+}
+
+type s3File struct {
+	Name string
+	Size int64
+	Owner string
+	StorageClass string
 }
 
 // Global Constants
@@ -314,7 +327,7 @@ func addJobs(jobs chan<- Job, files []os.FileInfo, results chan<- Result) {
 
 func doJobs(done chan<- struct{}, b s3.Bucket, dir string, prefix string, jobs <-chan Job) {
 	for job := range jobs {
-	s3Put(b, job.filename, dir, prefix)
+		s3Put(b, job.filename, dir, prefix)
 	}
 	done <- struct{}{}
 
@@ -323,27 +336,42 @@ func doJobs(done chan<- struct{}, b s3.Bucket, dir string, prefix string, jobs <
 func s3Put(b s3.Bucket, filename string, dir string, prefix string) {
 	readLocation := path.Join(dir, filename)
 	s3Path := path.Join(prefix, filename)
-	fmt.Println("Reading ", readLocation) 
+	fmt.Println("Reading ", readLocation)
 	file, err := ioutil.ReadFile(readLocation)
 	if err != nil {
 		panic(err)
 	}
-	
-	fmt.Println("Putting ", filename)
+
+	fmt.Println("Putting ", s3Path)
 	b.Put(s3Path, file, "binary/octet-stream", s3.Private)
+}
+
+func s3Ls( b s3.Bucket, prefix string, nextMarker string, maxMarker int) (isTruncated bool, next string) {
+	
+	resp, err := b.List(prefix, "", nextMarker, maxMarker)
+	if err != nil {
+		panic(err)
+		}
+	fmt.Println(resp)
+	return resp.IsTruncated, resp.Contents[len(resp.Contents)-1].Key
 }
 
 func main() {
 
 	// Define flags
-	srcbucket := flag.String("bucket", "bmi-weather-test", "Bucket from which to retrieve files")
-	prefix := flag.String("prefix", "Temp/", "Prefix from which to retrieve files")
-	directory := flag.String("dir", "/Users/nrobison/Developer/git/ParS3/", "Directory to store files")
+	//srcbucket := flag.String("bucket", "bmi-weather-test", "Bucket from which to retrieve files")
+	//prefix := flag.String("prefix", "Temp/", "Prefix from which to retrieve files")
+	//directory := flag.String("dir", "/Users/nrobison/Developer/git/ParS3/", "Directory to store files")
 	maxMarker := flag.Int("max", 1000, "Max Markers to Retrieve per Worker")
 	hadoopWrite := flag.Bool("hadoop", false, "Write Files to Hadoop Destination")
 	hashCheck := flag.Bool("hash", false, "Check MD5 Hashes of Downloaded Files")
-	gets := flag.Bool("gets", false, "Get Files from S3")
+	//gets := flag.Bool("gets", false, "Get Files from S3")
 	flag.Parse()
+
+	verb := strings.ToLower(os.Args[1])
+	var srcdir string = os.Args[2]
+	var destdir string = os.Args[3]
+	//var destdir string = ""
 
 	hadoop := *hadoopWrite
 	//
@@ -376,74 +404,143 @@ func main() {
 		SecretKey: cfgFile.AWSCredentials.SecretKey,
 	}
 
-//	if hadoop == true {
-//		configureHadoop(cfgFile.System.javaHome, cfgFile.System.ldPath)
-//	}
+	//	if hadoop == true {
+	//		configureHadoop(cfgFile.System.javaHome, cfgFile.System.ldPath)
+	//	}
 
 	e := s3.New(auth, aws.USEast)
 
-	b := s3.Bucket{
-		S3:   e,
-		Name: *srcbucket,
-	}
-
-	// Check for Directory
-	errdir := os.MkdirAll(*directory, 0777)
-	if errdir != nil {
-		panic(errdir)
-	}
-
-	i := s3.Bucket(b)
 	//fmt.Println("Number of workers: ", workers)
-	
-	if *gets == true {
-	nextLoop := continueOn{truncated: true, nextMarker: "", finished: false}
-	done := make(chan struct{}, workers)
-	leftmost := make(chan continueOn)
-	right := leftmost
-	left := leftmost
 
-	for nextLoop.truncated == true && nextLoop.finished == false {
-		leftmost = make(chan continueOn)
-		right = leftmost
-		left = leftmost
-		for z := 0; z < workers; z++ {
-			//		nextLoop = getandsave(i, "Singles/", passit.nextMarker, passit)
-			//nextLoop = <-passit
-			//		fmt.Println("mainLoop")
-			right = make(chan continueOn)
-			go getandsave(i, *prefix, left, right, done, z, *directory, *maxMarker, hadoop, *hashCheck)
-			//nextLoop = <-right
-			left = right
-			//		fmt.Println("Running next on: ", nextLoop.nextMarker)
-			//fmt.Println(nextLoop.markersReturned)
-			//		left = make(chan continueOn)
+	if verb == "get" {
+		// Check for Valid Src Bucket
+		if strings.HasPrefix(srcdir, "s3://") != true {
+			fmt.Println("Not an S3 bucket")
+			os.Exit(1)
 		}
-		go func(c chan continueOn) { c <- nextLoop }(right)
-		nextLoop = <-leftmost
-		awaitCompletion(done)
-	}
-	}
-	
-	if *gets != true {
-	
+
+		// Check for Directory
+		errdir := os.MkdirAll(destdir, 0777)
+		if errdir != nil {
+			panic(errdir)
+		}
+
+		// Format source string
+		srcdir = strings.Replace(srcdir, "s3://", "", 1)
+		srcdir2 := strings.Split(srcdir, "/")
+		srcbucket := srcdir2[0]
+		prefix := strings.Join(srcdir2[1:], "/")
+
+		// Bucket
+
+		b := s3.Bucket{
+			S3:   e,
+			Name: srcbucket,
+		}
+
+		i := s3.Bucket(b)
+
+		nextLoop := continueOn{truncated: true, nextMarker: "", finished: false}
+		done := make(chan struct{}, workers)
+		leftmost := make(chan continueOn)
+		right := leftmost
+		left := leftmost
+
+		for nextLoop.truncated == true && nextLoop.finished == false {
+			leftmost = make(chan continueOn)
+			right = leftmost
+			left = leftmost
+			for z := 0; z < workers; z++ {
+				//		nextLoop = getandsave(i, "Singles/", passit.nextMarker, passit)
+				//nextLoop = <-passit
+				//		fmt.Println("mainLoop")
+				right = make(chan continueOn)
+				go getandsave(i, prefix, left, right, done, z, destdir, *maxMarker, hadoop, *hashCheck)
+				//nextLoop = <-right
+				left = right
+				//		fmt.Println("Running next on: ", nextLoop.nextMarker)
+				//fmt.Println(nextLoop.markersReturned)
+				//		left = make(chan continueOn)
+			}
+			go func(c chan continueOn) { c <- nextLoop }(right)
+			nextLoop = <-leftmost
+			awaitCompletion(done)
+		}
+	} else if verb == "put" {
+
+		// Check for Valid Dest Bucket
+		if strings.HasPrefix(destdir, "s3://") != true {
+			fmt.Println("Not an S3 bucket")
+			os.Exit(1)
+		}
+
+		// Format Dest string
+		destdir := strings.Replace(destdir, "s3://", "", 1)
+		destdir2 := strings.Split(destdir, "/")
+		destbucket := destdir2[0]
+		prefix := strings.Join(destdir2[1:], "/")
+
+		// Bucket
+
+		b := s3.Bucket{
+			S3:   e,
+			Name: destbucket,
+		}
+
+		i := s3.Bucket(b)
+
 		// Get Directory List
-		files, _ := ioutil.ReadDir(*directory)
-		fmt.Println("Uploading %s files", len(files))
-		
+		files, _ := ioutil.ReadDir(srcdir)
+		fmt.Printf("Uploading %d files\n", len(files))
+
 		jobs := make(chan Job, workers)
 		results := make(chan Result, len(files))
 		done := make(chan struct{}, workers)
-		
+
 		go addJobs(jobs, files, results)
 		for j := 0; j < workers; j++ {
-			go doJobs(done, i, *directory, *prefix, jobs)
+			go doJobs(done, i, srcdir, prefix, jobs)
 		}
 		awaitCompletion(done)
 		close(results)
-			
+
+	} else if verb == "ls" {
+
+		// Check for Valid Bucket
+		if strings.HasPrefix(srcdir, "s3://") != true {
+			fmt.Println("Not an S3 bucket")
+			os.Exit(1)
+		}
+
+		// Format string
+		srcdir = strings.Replace(srcdir, "s3://", "", 1)
+		srcdir2 := strings.Split(srcdir, "/")
+		srcbucket := srcdir2[0]
+		prefix := strings.Join(srcdir2[1:], "/")
+
+		// Bucket
+
+		b := s3.Bucket{
+			S3:   e,
+			Name: srcbucket,
+		}
 		
+		
+		//isTruncated := true
+		nextMarker := ""
+		
+		//for  isTruncated == true {
+			
+			//isTruncated, nextMarker =
+			s3Ls(b, prefix, nextMarker, *maxMarker)
+		//}
+	
+		
+	
+	} else {
+
+		fmt.Println("Invalid Action")
+		os.Exit(1)
 	}
 
 }
-
