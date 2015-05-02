@@ -397,12 +397,16 @@ func main() {
 
 	//var cfgFile AWSCredentialsType
 	var cfgFile ConfigSettingsType
-	json.Unmarshal(file, &cfgFile)
+	err = json.Unmarshal(file, &cfgFile)
+	if err != nil {
+		panic(err)
+	}
 
 	auth := aws.Auth{
 		AccessKey: cfgFile.AWSCredentials.AccessKey,
 		SecretKey: cfgFile.AWSCredentials.SecretKey,
 	}
+	fmt.Println(cfgFile.AWSCredentials)
 
 	//	if hadoop == true {
 	//		configureHadoop(cfgFile.System.javaHome, cfgFile.System.ldPath)
