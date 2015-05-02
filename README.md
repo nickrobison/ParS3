@@ -15,7 +15,7 @@ Reduce. It's really good at that.
 
 ### Installation
 - Install Golang: https://golang.org/doc/install
-- Get ParS3: go get -d github.com/nickrobison/ParS3
+- Get ParS3: go get github.com/nickrobison/ParS3
 
 ### Usage
 
