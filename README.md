@@ -34,7 +34,7 @@ with the following contents:
 ParS3 currently supports the ability to get/put files using the
 following syntax:
 
-```go
+```bash
 ParS3 get s3://(source-bucket)/(source-directory) (destination-directory)/
 
 ParS3 put (source-directory)/*
